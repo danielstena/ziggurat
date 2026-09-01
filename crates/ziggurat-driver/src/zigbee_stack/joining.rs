@@ -121,6 +121,14 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             },
             self.core_now(),
         );
+        tracing::info!(
+            ieee = ?source_eui64,
+            nwk = ?short_address,
+            device_type = ?device_type,
+            rx_on_when_idle = request.receive_on_when_idle,
+            timeout_seconds = device_timeout.as_secs(),
+            "Created or refreshed coordinator child state during association"
+        );
 
         // A new child deadline may precede everything the maintenance task knows
         self.maintenance_wake.notify_one();
@@ -176,12 +184,29 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
+        tracing::info!(
+            ieee = ?eui64,
+            nwk = ?nwk,
+            ?join_kind,
+            "Network key transport was extracted by the joining device"
+        );
+
         self.announce_join(nwk, eui64);
     }
 
     /// Emit the `DeviceJoined` notification for a device whose key material is in place.
     fn announce_join(&self, nwk: Nwk, eui64: Eui64) {
         let (device_type, rx_on_when_idle) = self.device_join_capability(eui64);
+
+        tracing::info!(
+            ieee = ?eui64,
+            nwk = ?nwk,
+            parent = ?self.state.network_address,
+            ?device_type,
+            rx_on_when_idle,
+            coordinator_is_parent = self.state.network_address == Nwk(0x0000),
+            "Announcing completed Zigbee join to the host"
+        );
 
         self.push_notification(ZigbeeNotification::DeviceJoined {
             nwk,
@@ -1374,15 +1399,20 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        tracing::info!(
-            "Device {source:?} is leaving the network (rejoin: {})",
-            leave_cmd.rejoin
-        );
-
         let source_ieee = nwk_frame
             .nwk_header
             .source_ieee
             .or_else(|| self.core().nib.address_map.eui64_for(source));
+
+        tracing::info!(
+            nwk = ?source,
+            ieee = ?source_ieee,
+            request = leave_cmd.request,
+            rejoin = leave_cmd.rejoin,
+            remove_children = leave_cmd.remove_children,
+            nwk_security = nwk_frame.aux_header.is_some(),
+            "Device initiated a Zigbee network leave"
+        );
 
         if let Some(source_ieee) = source_ieee {
             self.core().nib.neighbors.remove(source_ieee);

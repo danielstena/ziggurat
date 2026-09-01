@@ -122,7 +122,11 @@ impl NwkSecurity {
         // Spec 4.3.1.2 step 1: a frame counter at its maximum value is rejected
         // outright; the sender must rotate the network key before it wraps.
         if frame_counter == u32::MAX {
-            tracing::debug!("Ignoring frame, frame counter is at its maximum value");
+            tracing::warn!(
+                ?sender,
+                frame_counter,
+                "Rejecting NWK frame because its security counter is exhausted"
+            );
             return None;
         }
 
@@ -132,9 +136,11 @@ impl NwkSecurity {
             }
             Some(&last_stored_frame_counter) => {
                 if frame_counter <= last_stored_frame_counter {
-                    tracing::debug!(
-                        "Ignoring frame, frame counter has rolled backward from \
-                         {last_stored_frame_counter} to {frame_counter}"
+                    tracing::warn!(
+                        ?sender,
+                        frame_counter,
+                        last_stored_frame_counter,
+                        "Rejecting replayed NWK frame counter"
                     );
                     return None;
                 }

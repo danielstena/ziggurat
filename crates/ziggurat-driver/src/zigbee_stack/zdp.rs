@@ -204,6 +204,17 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
+        let (device_type, rx_on_when_idle) = self.device_join_capability(annce.ieee_addr);
+        tracing::info!(
+            source = ?source,
+            announced_nwk = ?annce.nwk_addr,
+            announced_ieee = ?annce.ieee_addr,
+            ?device_type,
+            rx_on_when_idle,
+            coordinator_is_parent = device_type.is_some(),
+            "Received Zigbee device announcement"
+        );
+
         self.core()
             .nib
             .address_map
