@@ -448,7 +448,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
                 NwkCommand::RejoinRequest(cmd) => {
                     self.handle_rejoin_request(nwk_frame, cmd.clone(), true);
                 }
-                NwkCommand::Leave(cmd) => self.handle_leave(nwk_frame, cmd.clone()),
+                NwkCommand::Leave(cmd) => self.handle_leave(nwk_frame, cmd.clone(), sender_nwk),
                 NwkCommand::NetworkStatus(cmd) => {
                     self.handle_network_status(nwk_frame, cmd.clone())
                 }

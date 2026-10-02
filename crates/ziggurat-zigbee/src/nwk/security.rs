@@ -28,6 +28,14 @@ pub struct CounterAdvance {
     pub should_persist: bool,
 }
 
+/// One completed, authenticated departure awaiting a new association. Captured
+/// at admission so an older join task cannot reset a later security epoch.
+#[derive(Debug, Clone, Copy)]
+pub struct NewJoinCounterReset {
+    sender: Eui64,
+    generation: u64,
+}
+
 /// The NWK security material: the network key, its outgoing frame counter, and the
 /// per-relayer incoming frame counters used for replay protection (spec 4.3.1.2).
 #[derive(Debug)]
@@ -43,6 +51,8 @@ pub struct NwkSecurity {
     all_fresh: bool,
     /// Every this many outgoing frames, a counter advance asks to be persisted
     persist_interval: u32,
+    departed: FlatMap<Eui64, u64>,
+    departure_generation: u64,
 }
 
 impl NwkSecurity {
@@ -70,6 +80,8 @@ impl NwkSecurity {
             active_key_seq_number: key_seq_number,
             all_fresh: false,
             persist_interval,
+            departed: FlatMap::new(),
+            departure_generation: 0,
         }
     }
 
@@ -156,5 +168,78 @@ impl NwkSecurity {
         self.primary
             .incoming_frame_counter_set
             .insert(sender, frame_counter)
+    }
+
+    /// Called only for a successfully authenticated, direct leave announcement
+    /// with rejoin=false. Keep the old replay floor until a newly admitted device
+    /// actually extracts its network key; departure alone does not admit traffic.
+    pub fn note_authenticated_departure(&mut self, sender: Eui64) {
+        self.departure_generation = self.departure_generation.checked_add(1).unwrap();
+        self.departed.insert(sender, self.departure_generation);
+    }
+
+    pub fn new_join_counter_reset(&self, sender: Eui64) -> Option<NewJoinCounterReset> {
+        self.departed
+            .get(&sender)
+            .map(|&generation| NewJoinCounterReset { sender, generation })
+    }
+
+    /// Complete the peer's fresh association exactly once. Ordinary rejoins,
+    /// duplicate associations and stale completions keep their replay floor.
+    pub fn complete_new_join(&mut self, reset: NewJoinCounterReset) -> bool {
+        if self.departed.get(&reset.sender) != Some(&reset.generation) {
+            return false;
+        }
+        self.departed.remove(&reset.sender);
+        self.primary
+            .incoming_frame_counter_set
+            .remove(&reset.sender);
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn security() -> NwkSecurity {
+        NwkSecurity::new(
+            Key::from_hex("00112233445566778899aabbccddeeff"),
+            3,
+            500,
+            100,
+        )
+    }
+
+    #[test]
+    fn stale_join_completion_cannot_consume_a_later_departure() {
+        let sender = Eui64::from_hex("00124b0000000001");
+        let mut security = security();
+        security.note_inbound_frame_counter(sender, 58);
+        security.note_authenticated_departure(sender);
+        let old = security.new_join_counter_reset(sender).unwrap();
+        security.note_authenticated_departure(sender);
+        assert!(!security.complete_new_join(old));
+        assert!(security.inbound_network_key(sender, 3, 0).is_none());
+        let current = security.new_join_counter_reset(sender).unwrap();
+        assert!(security.complete_new_join(current));
+        security.note_inbound_frame_counter(sender, 6);
+        assert!(!security.complete_new_join(current));
+        assert!(security.inbound_network_key(sender, 3, 6).is_none());
+    }
+
+    #[test]
+    fn fresh_counter_epoch_preserves_key_sequence_exhaustion_and_outgoing_counter() {
+        let sender = Eui64::from_hex("00124b0000000001");
+        let mut security = security();
+        assert!(security.new_join_counter_reset(sender).is_none());
+        security.note_inbound_frame_counter(sender, 58);
+        security.note_authenticated_departure(sender);
+        let reset = security.new_join_counter_reset(sender).unwrap();
+        assert!(security.complete_new_join(reset));
+        assert!(security.inbound_network_key(sender, 3, 0).is_some());
+        assert!(security.inbound_network_key(sender, 2, 0).is_none());
+        assert!(security.inbound_network_key(sender, 3, u32::MAX).is_none());
+        assert_eq!(security.next_outgoing_frame_counter().value, 501);
     }
 }

@@ -42,3 +42,6 @@ jobs:
 
       - name: Lint and static analysis
         run: prek run --show-diff-on-failure --color=always --all-files
+
+      - name: Host workspace regression tests
+        run: cargo test --locked --workspace --all-targets
