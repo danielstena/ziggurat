@@ -100,33 +100,26 @@ impl ApsAckFrame {
             ));
         }
 
-        let destination_endpoint;
-        let cluster_id;
-        let profile_id;
-        let source_endpoint;
-        let counter;
-
         // An ack-format ack (for an APS command) carries only frame control and a
         // counter; a data ack additionally carries the addressing fields
-        if frame_control.ack_format {
-            if remaining.is_empty() {
-                return Err(ParseError::UnexpectedEnd { ty: "ApsAckFrame" });
-            }
-            destination_endpoint = None;
-            cluster_id = None;
-            profile_id = None;
-            source_endpoint = None;
-            counter = u8::from_le_bytes([remaining[0]]);
-        } else {
-            if remaining.len() < 7 {
-                return Err(ParseError::UnexpectedEnd { ty: "ApsAckFrame" });
-            }
-            destination_endpoint = Some(u8::from_le_bytes([remaining[0]]));
-            cluster_id = Some(u16::from_le_bytes([remaining[1], remaining[2]]));
-            profile_id = Some(u16::from_le_bytes([remaining[3], remaining[4]]));
-            source_endpoint = Some(u8::from_le_bytes([remaining[5]]));
-            counter = u8::from_le_bytes([remaining[6]]);
-        }
+        let (destination_endpoint, cluster_id, profile_id, source_endpoint, counter) =
+            if frame_control.ack_format {
+                if remaining.is_empty() {
+                    return Err(ParseError::UnexpectedEnd { ty: "ApsAckFrame" });
+                }
+                (None, None, None, None, remaining[0])
+            } else {
+                if remaining.len() < 7 {
+                    return Err(ParseError::UnexpectedEnd { ty: "ApsAckFrame" });
+                }
+                (
+                    Some(remaining[0]),
+                    Some(u16::from_le_bytes([remaining[1], remaining[2]])),
+                    Some(u16::from_le_bytes([remaining[3], remaining[4]])),
+                    Some(remaining[5]),
+                    remaining[6],
+                )
+            };
 
         Ok(Self {
             frame_control,

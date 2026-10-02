@@ -23,6 +23,7 @@ use ziggurat_zigbee::aps::security::AppliedKey;
 use ziggurat_zigbee::nwk::frame::{
     BROADCAST_RX_ON_WHEN_IDLE, NwkFrame, NwkPayload, NwkRouteDiscovery, NwkSecurityHeaderKeyId,
 };
+use ziggurat_zigbee::nwk::security::NewJoinCounterReset;
 
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -40,6 +41,9 @@ use super::{
     TrackStage, TxOutcome, TxPolicy, TxPriority, Unicast, ZigbeeNotification, ZigbeeStack,
     neighbors,
 };
+
+#[cfg(all(test, feature = "tokio"))]
+mod tests;
 
 impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     #[allow(clippy::significant_drop_tightening)]
@@ -97,6 +101,11 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         tracing::info!("Device {source_eui64:?} is joining as {short_address:?}");
 
         self.begin_join(source_eui64);
+        let counter_reset = self
+            .core()
+            .nib
+            .nwk_security
+            .new_join_counter_reset(source_eui64);
 
         // Joiners retry association requests if they miss our response, so the address
         // and table entries must be stable across retries
@@ -141,7 +150,9 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             .expect("Unable to upgrade self reference");
 
         self.tasklets.push(async move {
-            stack.run_join(source_eui64, short_address).await;
+            stack
+                .run_join(source_eui64, short_address, counter_reset)
+                .await;
         });
     }
 
@@ -149,7 +160,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
     /// the association response out of the indirect queue, confirming its short
     /// address; the network key follows; the join is announced once the key transport
     /// lands.
-    async fn run_join(&self, eui64: Eui64, short_address: Nwk) {
+    async fn run_join(
+        &self,
+        eui64: Eui64,
+        short_address: Nwk,
+        counter_reset: Option<NewJoinCounterReset>,
+    ) {
         let Some(response) = self.queue_association_response(
             eui64,
             short_address,
@@ -165,13 +181,19 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             return;
         }
 
-        self.deliver_key_and_announce(short_address, eui64, JoinKind::New)
+        self.deliver_key_and_announce(short_address, eui64, JoinKind::New, counter_reset)
             .await;
     }
 
     /// Deliver the network key and, once the transport lands, announce the join. The
     /// shared tail of the association and unsecured-rejoin flows.
-    async fn deliver_key_and_announce(&self, nwk: Nwk, eui64: Eui64, join_kind: JoinKind) {
+    async fn deliver_key_and_announce(
+        &self,
+        nwk: Nwk,
+        eui64: Eui64,
+        join_kind: JoinKind,
+        counter_reset: Option<NewJoinCounterReset>,
+    ) {
         let Some(key_transport) = self.send_network_key(nwk, eui64, join_kind) else {
             return;
         };
@@ -190,6 +212,13 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
             ?join_kind,
             "Network key transport was extracted by the joining device"
         );
+
+        if matches!(join_kind, JoinKind::New)
+            && let Some(reset) = counter_reset
+            && self.core().nib.nwk_security.complete_new_join(reset)
+        {
+            tracing::info!(ieee = ?eui64, "Retired departed device's NWK replay floor after fresh key delivery");
+        }
 
         self.announce_join(nwk, eui64);
     }
@@ -1274,7 +1303,7 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
             self.tasklets.push(async move {
                 stack
-                    .deliver_key_and_announce(assigned_nwk, source_ieee, JoinKind::Rejoin)
+                    .deliver_key_and_announce(assigned_nwk, source_ieee, JoinKind::Rejoin, None)
                     .await;
             });
         } else {
@@ -1324,7 +1353,12 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
 
     /// Zigbee spec 3.6.1.10.3: a device announces that it is leaving the network, or
     /// asks us to leave (which a coordinator ignores).
-    pub(super) fn handle_leave(&self, nwk_frame: &NwkFrame, leave_cmd: NwkLeaveCommand) {
+    pub(super) fn handle_leave(
+        &self,
+        nwk_frame: &NwkFrame,
+        leave_cmd: NwkLeaveCommand,
+        sender_nwk: Nwk,
+    ) {
         let source = nwk_frame.nwk_header.source;
 
         if leave_cmd.request {
@@ -1349,7 +1383,22 @@ impl<P: RadioPhy, R: Runtime> ZigbeeStack<P, R> {
         );
 
         if let Some(source_ieee) = source_ieee {
-            self.core().nib.neighbors.remove(source_ieee);
+            let mut core = self.core();
+            core.nib.neighbors.remove(source_ieee);
+            // Only the leaving peer's own authenticated announcement can prepare
+            // a fresh counter epoch. A router's relayed leave must never reset
+            // that router's replay floor, nor authorize a reset for another peer.
+            if !leave_cmd.rejoin
+                && sender_nwk == source
+                && nwk_frame
+                    .aux_header
+                    .as_ref()
+                    .is_some_and(|aux| aux.extended_source == Some(source_ieee))
+            {
+                core.nib
+                    .nwk_security
+                    .note_authenticated_departure(source_ieee);
+            }
         }
 
         // The address map entry and any negotiated link key are kept around so that the
